@@ -84,8 +84,7 @@ public class Navigator {
     public func open(externalURL: URL, _ via: ExternalURLNavigationAction) {
         switch via {
         case .openViaSystem:
-            UIApplication.shared.open(externalURL)
-
+            UIApplication.shared.open(externalURL, options: [:], completionHandler: nil)
         case .openViaSafariController:
             /// SFSafariViewController will crash if we pass along a URL that's not valid.
             guard externalURL.scheme == "http" || externalURL.scheme == "https" else { return }
