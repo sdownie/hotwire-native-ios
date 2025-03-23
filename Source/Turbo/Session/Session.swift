@@ -234,7 +234,7 @@ extension Session: VisitableDelegate {
             previousVisit = nil
         }
 
-        guard let topmostVisit = topmostVisit, let currentVisit = currentVisit else { return }
+        guard let topmostVisit, let currentVisit else { return }
 
         if isSnapshotCacheStale {
             clearSnapshotCache()
@@ -244,21 +244,44 @@ extension Session: VisitableDelegate {
         if isShowingStaleContent {
             reload()
             isShowingStaleContent = false
-        } else if visitable === topmostVisit.visitable && visitable.visitableViewController.isMovingToParent {
-            // Back swipe gesture canceled
+            return
+        }
+
+        // Back swipe gesture canceled.
+        if visitable === topmostVisit.visitable && visitable.visitableViewController.isMovingToParent {
             if topmostVisit.state == .completed {
                 currentVisit.cancel()
             } else {
                 visit(visitable, action: .advance)
             }
-        } else if visitable === currentVisit.visitable && currentVisit.state == .started {
-            // Navigating forward - complete navigation early
-            completeNavigationForCurrentVisit()
-        } else if visitable !== topmostVisit.visitable {
-            // Navigating backward from a web view screen to a web view screen.
+            return
+        }
+
+        // Navigating forward - complete navigation early.
+        if visitable === currentVisit.visitable {
+            let currentVisitHasResponse = currentVisit.options.response?.responseHTML != nil
+            
+            /// Most visits will be `.started` here, but form submission redirects containing `response.responseHTML` in
+            /// the modal context while navigating back to the default context will already be `.completed` at this point.
+            if currentVisit.state == .started || (currentVisitHasResponse && currentVisit.state == .completed) {
+                completeNavigationForCurrentVisit()
+                return
+            }
+        }
+
+        // Navigating backward from a web view screen to a web view screen.
+        if visitable !== topmostVisit.visitable {
             visit(visitable, action: .restore)
-        } else if visitable === previousVisit?.visitable {
-            // Navigating backward from a native to a web view screen.
+            return
+        }
+        
+        // If the topmost visitable is already the active visitable, nothing needs to be done
+        if topmostVisitable === activeVisitable {
+            return
+        }
+
+        // Navigating backward from a native to a web view screen.
+        if visitable === previousVisit?.visitable {
             visit(visitable, action: .restore)
         }
     }
@@ -339,6 +362,96 @@ extension Session: WebViewDelegate {
         initialized = false
         currentVisit.cancel()
         visit(currentVisit.visitable)
+    }
+
+    /// Called by the Turbo bridge when a visit request fails with a non-HTTP status code,
+    /// suggesting it may be the result of a cross-origin redirect visit.
+    ///
+    /// Determining a cross-origin redirect is not possible in JavaScript using the Fetch API
+    /// due to CORS restrictions, so verification is performed on the native side.
+    /// If a redirect is detected, a cross-origin redirect visit is proposed; otherwise,
+    /// the visit is failed.
+    ///
+    /// - Parameters:
+    ///   - webView: The web view bridge.
+    ///   - location: The original visit location requested.
+    ///   - identifier: A unique identifier for the visit.
+    func webView(_ webView: WebViewBridge, didFailRequestWithNonHttpStatusToLocation location: URL, identifier: String) {
+        log("didFailRequestWithNonHttpStatusToLocation",
+            ["location": location,
+             "visitIdentifier": identifier]
+        )
+
+        Task {
+            await resolveRedirect(to: location, identifier: identifier)
+        }
+    }
+
+    private func resolveRedirect(to location: URL, identifier: String) async {
+        do {
+            let result = try await RedirectHandler().resolve(location: location)
+            switch result {
+            case .noRedirect:
+                log("resolveRedirect: no redirect",
+                    ["location": location,
+                     "visitIdentifier": identifier]
+                )
+                await failCurrentVisit(
+                    with: TurboError.http(statusCode: 0),
+                    visitIdentifier: identifier
+                )
+            case .sameOriginRedirect(let url):
+                // Same-domain redirects are handled by Turbo.
+                // Handling them here could lead to an infinite loop.
+                log("resolveRedirect: same domain redirect",
+                    ["location": location,
+                     "redirectLocation": url,
+                     "visitIdentifier": identifier]
+                )
+                await failCurrentVisit(
+                    with: TurboError.http(statusCode: 0),
+                    visitIdentifier: identifier
+                )
+            case .crossOriginRedirect(let url):
+                await visitProposedToCrossOriginRedirect(
+                    location: location,
+                    redirectLocation: url,
+                    visitIdentifier: identifier
+                )
+            }
+        } catch {
+            await failCurrentVisit(
+                with: error,
+                visitIdentifier: identifier
+            )
+        }
+    }
+
+    @MainActor
+    private func failCurrentVisit(with error: Error, visitIdentifier: String) {
+        // This is only relevant to `JavaScriptVisit`, as `ColdBootVisit` currently
+        // doesn't go through the same flow.
+        guard let visit = currentVisit as? JavaScriptVisit,
+              visit.identifier == visitIdentifier else { return }
+
+        visit.fail(with: error)
+    }
+
+    @MainActor
+    private func visitProposedToCrossOriginRedirect(
+        location: URL,
+        redirectLocation: URL,
+        visitIdentifier: String) {
+        log("visitProposedToCrossOriginRedirect",
+            ["location": location,
+             "redirectLocation": redirectLocation,
+             "visitIdentifier": visitIdentifier]
+        )
+
+        guard let visit = currentVisit as? JavaScriptVisit,
+              visit.identifier == visitIdentifier else { return }
+
+        delegate?.session(self, didProposeVisitToCrossOriginRedirect: redirectLocation)
     }
 }
 

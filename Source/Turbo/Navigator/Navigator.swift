@@ -6,14 +6,22 @@ import WebKit
 class DefaultNavigatorDelegate: NSObject, NavigatorDelegate {}
 
 /// Handles navigation to new URLs using the following rules:
-/// [Navigator Handled Flows](https://github.com/hotwired/turbo-ios/Docs/Navigator.md)
+/// [Navigator Handled Flows](https://native.hotwired.dev/reference/navigation)
 public class Navigator {
     public unowned var delegate: NavigatorDelegate
 
     public var rootViewController: UINavigationController { hierarchyController.navigationController }
     public var modalRootViewController: UINavigationController { hierarchyController.modalNavigationController }
     public var activeNavigationController: UINavigationController { hierarchyController.activeNavigationController }
-
+    public var activeWebView: WKWebView {
+        if activeNavigationController == rootViewController {
+            return session.webView
+        }
+        return modalSession.webView
+    }
+    public private(set) var session: Session
+    public private(set) var modalSession: Session
+    
     /// Set to handle customize behavior of the `WKUIDelegate`.
     ///
     /// Subclass `WKUIController` to add additional behavior alongside alert/confirm dialogs.
@@ -27,14 +35,13 @@ public class Navigator {
 
     /// Convenience initializer that doesn't require manually creating `Session` instances.
     /// - Parameters:
-    ///   - pathConfiguration: _optional:_ remote configuration reference
     ///   - delegate: _optional:_ delegate to handle custom view controllers
-    public convenience init(pathConfiguration: PathConfiguration? = nil, delegate: NavigatorDelegate? = nil) {
+    public convenience init(delegate: NavigatorDelegate? = nil) {
         let session = Session(webView: Hotwire.config.makeWebView())
-        session.pathConfiguration = pathConfiguration
+        session.pathConfiguration = Hotwire.config.pathConfiguration
 
         let modalSession = Session(webView: Hotwire.config.makeWebView())
-        modalSession.pathConfiguration = pathConfiguration
+        modalSession.pathConfiguration = Hotwire.config.pathConfiguration
 
         self.init(session: session, modalSession: modalSession, delegate: delegate)
     }
@@ -47,7 +54,7 @@ public class Navigator {
     /// - Parameter parameters: provide context relevant to `url`
     public func route(_ url: URL, options: VisitOptions? = VisitOptions(action: .advance), parameters: [String: Any]? = nil) {
         let properties = session.pathConfiguration?.properties(for: url) ?? PathProperties()
-        route(VisitProposal(url: url, options: options ?? .init(action: .advance), properties: properties))
+        route(VisitProposal(url: url, options: options ?? .init(action: .advance), properties: properties, parameters: parameters))
     }
 
     /// Transforms `VisitProposal` -> `UIViewController`
@@ -74,6 +81,12 @@ public class Navigator {
     /// otherwise, pass false.
     public func clearAll(animated: Bool = false) {
         hierarchyController.clearAll(animated: animated)
+    }
+
+    /// Reloads the main and modal `Session`.
+    public func reload() {
+        session.reload()
+        modalSession.reload()
     }
 
     /// Navigate to an external URL.
@@ -113,8 +126,6 @@ public class Navigator {
 
     // MARK: Internal
 
-    var session: Session
-    var modalSession: Session
     /// Modifies a UINavigationController according to visit proposals.
     lazy var hierarchyController = NavigationHierarchyController(delegate: self)
 
@@ -164,6 +175,14 @@ extension Navigator: SessionDelegate {
     public func session(_ session: Session, didProposeVisit proposal: VisitProposal) {
         guard let controller = controller(for: proposal) else { return }
         hierarchyController.route(controller: controller, proposal: proposal)
+    }
+
+    public func session(_ session: Session, didProposeVisitToCrossOriginRedirect location: URL) {
+        // Pop the current destination from the backstack since it
+        // resulted in a visit failure due to a cross-origin redirect.
+        pop(animated: false)
+        let decision = delegate.handle(externalURL: location)
+        open(externalURL: location, decision)
     }
 
     public func sessionDidStartFormSubmission(_ session: Session) {

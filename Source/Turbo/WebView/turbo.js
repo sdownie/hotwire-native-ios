@@ -142,7 +142,17 @@
     }
 
     visitRequestFailedWithStatusCode(visit, statusCode) {
-      this.postMessage("visitRequestFailed", { identifier: visit.identifier, statusCode: statusCode })
+      const location = visit.location.toString()
+
+      // Non-HTTP status codes are sent by Turbo for network failures, including
+      // cross-origin fetch redirect attempts. For non-HTTP status codes, pass to
+      // the native side to determine whether a cross-origin redirect visit should
+      // be proposed.
+      if (statusCode <= 0) {
+        this.postMessage("visitRequestFailedWithNonHttpStatusCode", { location: location, identifier: visit.identifier })
+      } else {
+        this.postMessage("visitRequestFailed", { location: location, identifier: visit.identifier, statusCode: statusCode })
+      }
     }
 
     visitRequestFinished(visit) {
@@ -167,6 +177,13 @@
 
     pageInvalidated() {
       this.postMessage("pageInvalidated")
+    }
+
+    linkPrefetchingIsEnabledForLocation(location) {
+      // Disable link prefetching since it can be activated by link taps and
+      // cause double-requests across the default/modal context boundaries. We
+      // also don't want to prefetch links that may correspond to native screens.
+      return false
     }
 
     log(message) {

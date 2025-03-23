@@ -4,10 +4,16 @@ import WebKit
 public struct HotwireConfig {
     public typealias WebViewBlock = (_ configuration: WKWebViewConfiguration) -> WKWebView
 
-    /// Override to set a custom user agent.
-    /// - Important: Include "Hotwire Native" or "Turbo Native" to use `turbo_native_app?`
-    /// on your Rails server.
-    public var userAgent = "Hotwire Native iOS; Turbo Native iOS"
+    /// Set a custom user agent application prefix for every WKWebView instance.
+    ///
+    /// The library will automatically append a substring to your prefix
+    /// which includes:
+    /// - "Hotwire Native iOS; Turbo Native iOS;"
+    /// - "bridge-components: [your bridge components];"
+    ///
+    /// WKWebView's default user agent string will also appear at the
+    /// beginning of the user agent.
+    public var applicationUserAgentPrefix: String? = nil
 
     /// When enabled, adds a `UIBarButtonItem` of type `.done` to the left
     /// navigation bar button item on screens presented modally.
@@ -23,6 +29,22 @@ public struct HotwireConfig {
             HotwireLogger.debugLoggingEnabled = debugLoggingEnabled
         }
     }
+    
+    /// Gets the user agent that the library builds to identify the app
+    /// and its registered bridge components.
+    ///
+    /// The user agent includes:
+    /// - Your (optional) custom `applicationUserAgentPrefix`
+    /// - "Native iOS; Turbo Native iOS;"
+    /// - "bridge-components: [your bridge components];"
+    public var userAgent: String {
+        get {
+            return UserAgent.build(
+                applicationPrefix: applicationUserAgentPrefix,
+                componentTypes: Hotwire.bridgeComponentTypes
+            )
+        }
+    }
 
     // MARK: Turbo
 
@@ -36,9 +58,9 @@ public struct HotwireConfig {
     }
 
     /// The navigation controller used in `Navigator` for the main and modal stacks.
-    /// Must be a `UINavigationController` or subclass.
+    /// Must be a `HotwireNavigationController` or subclass.
     public var defaultNavigationController: () -> UINavigationController = {
-        UINavigationController()
+        HotwireNavigationController()
     }
 
     /// Optionally customize the web views used by each Turbo Session.
@@ -62,7 +84,13 @@ public struct HotwireConfig {
     // MARK: - Internal
 
     public func makeWebView() -> WKWebView {
-        makeCustomWebView(makeWebViewConfiguration())
+        let webView = makeCustomWebView(makeWebViewConfiguration())
+        
+        if !Hotwire.bridgeComponentTypes.isEmpty {
+            Bridge.initialize(webView)
+        }
+        
+        return webView
     }
 
     // MARK: - Private
@@ -76,13 +104,5 @@ public struct HotwireConfig {
         configuration.applicationNameForUserAgent = userAgent
         configuration.processPool = sharedProcessPool
         return configuration
-    }
-}
-
-public extension HotwireConfig {
-    class PathConfiguration {
-        /// Enable to include the query string (in addition to the path) when applying rules.
-        /// Disable to only consider the path when applying rules.
-        public var matchQueryStrings = true
     }
 }
